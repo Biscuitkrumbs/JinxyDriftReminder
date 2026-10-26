@@ -1,34 +1,58 @@
 -- Cast-timed reminder for build 12.1.5. This estimates the normal 45s cooldown;
 -- it does not read protected cooldown values or decide when Touch should be cast.
+local _, addon = ...
 local frame = CreateFrame("Frame")
 local timers = {touch = {}, soul = {}}
-local soundHandle
+local soundHandles = {touch = {}, soul = {}}
 local soulSeconds = 17.4 -- Observed Surge gain -> Soul gain in this character's 12.1.5 logs.
 -- A cast-timed estimate, not an aura-expiration measurement; configurable below.
 local db
 local options
+local refreshMenu
+local arcaneActive, soulAvailable = false, false
+addon.GetSettings = function() return db end
+addon.GetEligibility = function() return arcaneActive, soulAvailable end
+addon.SetMenu = function(menu, refresh) options = menu; refreshMenu = refresh end
+local function refreshEligibility()
+    local getSpec = C_SpecializationInfo and C_SpecializationInfo.GetSpecialization or GetSpecialization
+    local getInfo = C_SpecializationInfo and C_SpecializationInfo.GetSpecializationInfo or GetSpecializationInfo
+    local spec = getSpec and getSpec()
+    arcaneActive = spec and getInfo and getInfo(spec) == 62 or false
+    -- Memory of Al'ar is the selected passive granting Arcane Soul, not the
+    -- temporary Soul aura (451038). Unknown eligibility disables automatic Soul.
+    local known = IsPlayerSpell or (C_SpellBook and C_SpellBook.IsSpellKnown)
+    local ok, selected = false, false
+    if arcaneActive and known then ok, selected = pcall(known, 449619) end
+    soulAvailable = ok and selected == true
+    if refreshMenu then refreshMenu() end
+end
+
+-- UI construction is deferred until all command handlers are ready (below).
 local function cancel(kind)
     if not kind then
         cancel("touch"); cancel("soul")
-        if soundHandle then StopSound(soundHandle); soundHandle = nil end
         return
     end
     for _, timer in ipairs(timers[kind]) do timer:Cancel() end
     wipe(timers[kind])
+    for _, handle in ipairs(soundHandles[kind]) do StopSound(handle) end
+    wipe(soundHandles[kind])
 end
-local function say(clip)
+local function say(clip, kind)
     -- Let a short label finish before its numbers. Separate timers never cancel
     -- one another; overlapping cues can share the Master channel.
     local _, handle = PlaySoundFile("Interface\\AddOns\\JinxyTouchCountdown\\Sounds\\" .. clip .. ".wav", "Master")
-    soundHandle = handle
+    if handle then soundHandles[kind][#soundHandles[kind] + 1] = handle end
 end
-local function schedule(kind, duration)
+local function schedule(kind, duration, preview)
     cancel(kind)
     if not db or not db.enabled then return end
+    if not preview and (not arcaneActive or (kind == "soul" and not soulAvailable)) then return end
     local deadline = GetTime() + duration
     local function at(remaining, clip)
         timers[kind][#timers[kind] + 1] = C_Timer.NewTimer(duration - remaining, function()
-            if db.enabled and math.abs(deadline - GetTime() - remaining) < 0.5 then say(clip) end
+            local allowed = preview or (arcaneActive and (kind ~= "soul" or soulAvailable))
+            if db.enabled and allowed and math.abs(deadline - GetTime() - remaining) < 0.5 then say(clip, kind) end
         end)
     end
     -- Announce the ability before the first number, so 3/2/1 land at -3/-2/-1.
@@ -44,6 +68,10 @@ local function message(text) print("|cffb9a1ffJinxy Drift:|r " .. text) end
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("PLAYER_DEAD")
+frame:RegisterEvent("PLAYER_LOGIN")
+frame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+frame:RegisterEvent("PLAYER_TALENT_UPDATE")
+frame:RegisterEvent("TRAIT_CONFIG_UPDATED")
 frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 frame:SetScript("OnEvent", function(_, event, unit, _, spellID)
     if event == "ADDON_LOADED" then
@@ -56,7 +84,16 @@ frame:SetScript("OnEvent", function(_, event, unit, _, spellID)
         if db.audioVersion ~= 2 then db.lead = 3; db.audioVersion = 2 end
         if db.lead ~= 3 and db.lead ~= 5 then db.lead = 3 end
         if type(db.soulSeconds) ~= "number" or db.soulSeconds < 10 or db.soulSeconds > 30 then db.soulSeconds = soulSeconds end
-    elseif event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_DEAD" then
+    elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
+        if unit ~= "player" then return end
+        cancel(); refreshEligibility()
+    elseif event == "TRAIT_CONFIG_UPDATED" then
+        local active = C_ClassTalents and C_ClassTalents.GetActiveConfigID()
+        if active and unit ~= active then return end
+        cancel(); refreshEligibility()
+    elseif event == "PLAYER_TALENT_UPDATE" or event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
+        cancel(); refreshEligibility()
+    elseif event == "PLAYER_DEAD" then
         cancel()
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" and unit == "player" then
         if issecretvalue and issecretvalue(spellID) then return end
@@ -76,11 +113,11 @@ SlashCmdList.JINXYTOUCH = function(input)
     elseif command == "short" or command == "long" then
         db.touchWording = command; cancel()
         message("Touch wording: " .. command .. ".")
-        if options and options:IsShown() then options:Hide(); options:Show() end
+        if refreshMenu then refreshMenu() end
     elseif soulWording == "short" or soulWording == "long" then
         db.soulWording = soulWording; cancel("soul")
         message("Soul wording: " .. soulWording .. ".")
-        if options and options:IsShown() then options:Hide(); options:Show() end
+        if refreshMenu then refreshMenu() end
     elseif seconds and seconds >= 10 and seconds <= 30 then
         db.soulSeconds = seconds; cancel("soul")
         message("Soul reminder: " .. seconds .. "s after Surge success (estimate).")
@@ -91,86 +128,12 @@ SlashCmdList.JINXYTOUCH = function(input)
         db.enabled = command == "on"; cancel()
         message(db.enabled and "Enabled. Waiting for your next Touch or Surge cast." or "Disabled.")
     elseif command == "test" or command == "test soul" then
-        if db.enabled then cancel(); schedule(command == "test soul" and "soul" or "touch", db.lead + 3.25); message("Audio test starting shortly.")
+        if db.enabled then cancel(); schedule(command == "test soul" and "soul" or "touch", db.lead + 3.25, true); message("Audio test starting shortly.")
         else message("Enable first with /jinxytouch on.") end
     elseif command == "stop" then cancel(); message("Current countdown cancelled.")
     else
         message((db.enabled and "On" or "Off") .. ", Touch " .. db.touchWording .. ", Soul " .. db.soulWording .. ", " .. db.lead .. " second lead. Commands: menu, short, long, soul short, soul long, 3, 5, on, off, test, test soul, soul SECONDS, stop.")
     end
+    if refreshMenu then refreshMenu() end
 end
 
--- Small standalone menu: no dependency on another addon's options UI.
-options = CreateFrame("Frame", "JinxyTouchCountdownOptions", UIParent, "BasicFrameTemplateWithInset")
-options:SetSize(370, 380)
-options:SetPoint("CENTER")
-options:SetMovable(true)
-options:EnableMouse(true)
-options:RegisterForDrag("LeftButton")
-options:SetClampedToScreen(true)
-options:SetScript("OnDragStart", options.StartMoving)
-options:SetScript("OnDragStop", function(self)
-    self:StopMovingOrSizing()
-    if db then
-        local point, _, relativePoint, x, y = self:GetPoint()
-        db.menuPosition = {point = point, relativePoint = relativePoint, x = x, y = y}
-    end
-end)
-options.TitleText:SetText("Jinxy Drift Reminder")
-UISpecialFrames[#UISpecialFrames + 1] = "JinxyTouchCountdownOptions"
-
-local enabled = CreateFrame("CheckButton", nil, options, "UICheckButtonTemplate")
-enabled:SetPoint("TOPLEFT", 16, -36)
-enabled.Text:SetText("Enable voice reminders")
-enabled:SetScript("OnClick", function(self)
-    if not db then return end
-    db.enabled = self:GetChecked() and true or false
-    cancel()
-end)
-
-local function button(label, x, y, action)
-    local control = CreateFrame("Button", nil, options, "UIPanelButtonTemplate")
-    control:SetSize(155, 28)
-    control:SetPoint("TOPLEFT", x, y)
-    control:SetText(label)
-    control:SetScript("OnClick", action)
-    return control
-end
-local wording = options:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-wording:SetPoint("TOPLEFT", 20, -80)
-wording:SetWidth(330)
-wording:SetJustifyH("LEFT")
-local short = button("Short: Touch in", 20, -110, function() SlashCmdList.JINXYTOUCH("short") end)
-local long = button("Long: full spell name", 195, -110, function() SlashCmdList.JINXYTOUCH("long") end)
-local soulLabel = options:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-soulLabel:SetPoint("TOPLEFT", 20, -152)
-soulLabel:SetWidth(330)
-soulLabel:SetJustifyH("LEFT")
-local soulShort = button("Short: Soul in", 20, -182, function() SlashCmdList.JINXYTOUCH("soul short") end)
-local soulLong = button("Long: Soul + Burn", 195, -182, function() SlashCmdList.JINXYTOUCH("soul long") end)
-local countdownNote = options:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-countdownNote:SetPoint("TOPLEFT", 20, -220)
-countdownNote:SetText("Long Soul adds Burn at the estimated Soul start.")
-button("Preview Touch", 20, -245, function() SlashCmdList.JINXYTOUCH("test") end)
-button("Preview Soul", 195, -245, function() SlashCmdList.JINXYTOUCH("test soul") end)
-button("Stop countdowns", 20, -281, function() cancel() end)
-local note = options:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-note:SetPoint("BOTTOMLEFT", 20, 16)
-note:SetWidth(330)
-note:SetJustifyH("LEFT")
-note:SetText("Changes apply to your next cast. Soul timing is an estimate.\nDrag this window to move it; Escape closes it.")
-options:SetScript("OnShow", function(self)
-    if not db then return end
-    enabled:SetChecked(db.enabled)
-    wording:SetText("Touch wording: " .. (db.touchWording == "long" and "Touch of the Magi in" or "Touch in"))
-    short:SetEnabled(db.touchWording ~= "short")
-    long:SetEnabled(db.touchWording ~= "long")
-    soulLabel:SetText("Soul wording: " .. (db.soulWording == "long" and "Arcane Soul in + Burn" or "Soul in"))
-    soulShort:SetEnabled(db.soulWording ~= "short")
-    soulLong:SetEnabled(db.soulWording ~= "long")
-    local position = db.menuPosition
-    if type(position) == "table" and type(position.x) == "number" and type(position.y) == "number" then
-        self:ClearAllPoints()
-        self:SetPoint(position.point or "CENTER", UIParent, position.relativePoint or "CENTER", position.x, position.y)
-    end
-end)
-options:Hide()

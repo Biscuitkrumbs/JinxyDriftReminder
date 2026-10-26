@@ -3,7 +3,8 @@
 ## IconTexture: Interface\AddOns\JinxyTouchCountdown\Media\JinxyIcon
 ## Notes: Spoken Touch and estimated Soul preparation countdowns.
 ## Author: Jinxy
-## Version: 1.3.0
+## Version: 1.4.0
 ## SavedVariables: JinxyTouchCountdownDB
 JinxyTouchCountdown.lua
+Menu.lua
 Minimap.lua

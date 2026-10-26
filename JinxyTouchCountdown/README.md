@@ -1,5 +1,21 @@
 # Jinxy Drift Reminder
 
+## Version 1.4.0
+
+Compact Blizzard-standard menu with mutually exclusive Short/Long radio toggles
+and independent preview buttons. Existing settings and menu position are retained. Automatic reminders
+run only in Arcane (spec 62); Soul additionally requires the known Memory of
+Al'ar passive (449619). Unknown talent eligibility pauses automatic Soul cues.
+Previews still work in other specs. Spec/talent changes cancel queued cues and
+audio; return to Arcane and cast again to restart. The menu reports eligibility.
+The fixed 45-second Touch and configured 17.4-second Soul estimates are unchanged
+and may be inaccurate for talents that change cooldown or Surge/Phoenix timing.
+
+The compact menu has been checked visually in WoW. Lua mock tests exercise
+spec/talent changes, cue cancellation, previews, selections and saved settings;
+they do not establish timing accuracy for other builds. Check the configured
+timing against your character's buffs when changing talents.
+
 Click the pink-ponytail minimap icon to open or close settings and previews.
 Drag it around the minimap to reposition it; the position is saved. Hover to
 see enabled status and Touch/Soul wording choices. `/jinxydrift` opens the same
